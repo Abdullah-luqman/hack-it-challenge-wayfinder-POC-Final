@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gateway Guide — Live Wayfinding POC</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  body{font-family:'Inter',sans-serif}
+  .route{position:absolute;height:7px;background:#2471a3;border-radius:9999px;transform-origin:left center;display:none;z-index:6;box-shadow:0 0 0 3px rgba(36,113,163,.25)}
+  .route.show{display:block}
+  .tooltip{opacity:0;visibility:hidden;transform:translate(-50%,4px);transition:all .2s}
+  .tooltip.open{opacity:1;visibility:visible;transform:translate(-50%,0)}
+  /* side tooltip for toilet - positioned to the side, does not overlap map */
+  .tooltip.side-tip{transform:translate(0,calc(-50% + 4px));}
+  .tooltip.side-tip.open{transform:translate(0,-50%);}
+  /* lane tooltips positioned between lane lines */
+  .tooltip.lane-tip{transform:translate(0,4px);}
+  .tooltip.lane-tip.open{transform:translate(0,0);}
+  /* vertical text */
+  .vertical{writing-mode:vertical-rl;text-orientation:mixed}
+  /* crowd density — circles fallback, rectangles for building-shaped heatmaps */
+  .crowd-zone{position:absolute;border-radius:50%;pointer-events:none;transition:all .8s ease;z-index:5;box-sizing:border-box;aspect-ratio:1 / 1}
+  .crowd-zone.rect{border-radius:12px; aspect-ratio:auto; }
+  @keyframes pulse-zone{0%,100%{opacity:.88}50%{opacity:.68}}
+  .crowd-zone.pulse{animation:pulse-zone 2.2s ease-in-out infinite}
+  /* Mobile responsive map — keep UI element sizing/positioning, scale container proportionally */
+  #map{width:100%;}
+  @media (max-width: 640px){
+    #map{min-height:0 !important; aspect-ratio: 0.90 / 1; height:auto; overflow:visible;}
+    .map-tab-bar{flex-direction:column; align-items:stretch;}
+    .map-tabs{justify-content:center; width:100%;}
+    /* Keep inner views percentage-based so elements scale naturally; ensure no cropping */
+    #view-cluster, #view-carzone, #view-busservice{transform-origin:top left;}
+    /* Tooltip — keep anchored position (same transform as desktop) but make content responsive */
+    .tooltip{
+      transform:translate(-50%,4px) !important;
+      width:auto !important;
+      min-width:140px !important;
+      max-width:68vw !important;
+      white-space:normal !important;
+      word-break:break-word !important;
+      font-size:10.5px !important;
+      line-height:1.40 !important;
+      padding:10px 11px !important;
+      border-radius:10px !important;
+    }
+    .tooltip.open{transform:translate(-50%,0) !important;}
+    .tooltip.side-tip{
+      transform:translate(0,calc(-50% + 4px)) !important;
+      max-width:62vw !important;
+      width:62vw !important;
+      min-width:0 !important;
+      left:100% !important; /* keep side placement but ensure not off-screen */
+    }
+    .tooltip.side-tip.open{transform:translate(0,-50%) !important;}
+    .tooltip.lane-tip{
+      transform:translate(0,4px) !important;
+      max-width:60vw !important;
+      min-width:130px !important;
+    }
+    .tooltip.lane-tip.open{transform:translate(0,0) !important;}
+    /* Override fixed Tailwind widths (w-56/w-64/w-52/w-48) on mobile to fit viewport */
+    .tooltip.w-56, .tooltip.w-64, .tooltip.w-52, .tooltip.w-48{width:auto !important;}
+    /* Prevent map overflow-hidden from clipping tooltips near edges on mobile */
+    #view-cluster, #view-busservice, #view-carzone{overflow:visible;}
+  }
+  @media (max-width: 380px){
+    #map{aspect-ratio: 0.82 / 1;}
+  }
+</style>
+</head>
+<body class="bg-[#f4f6f8] text-[#17202a] antialiased">
+<header class="bg-[#102a43] text-white px-5 py-4 lg:px-6">
+  <div class="max-w-[1100px] mx-auto flex items-center justify-between gap-4">
+    <div>
+      <h1 class="m-0 text-[22px] font-extrabold tracking-tight">Gateway Guide</h1>
+      <p class="mt-1 text-[13px] opacity-80">Live crowd-aware wayfinding • Concept POC</p>
+    </div>
+    <span class="hidden sm:inline-flex items-center gap-2 bg-white/10 border border-white/15 rounded-full px-3 py-1.5 text-xs font-bold"><span class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></span> LIVE SYSTEM</span>
+  </div>
+</header>
+
+<div class="max-w-[1100px] mx-auto p-4 lg:p-[18px]">
+  <!-- grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-[350px_1fr] gap-4 lg:gap-[18px]">
+    <!-- left: destinations -->
+    <section class="bg-white rounded-2xl p-5 shadow-[0_4px_18px_rgba(0,0,0,.07)]">
+      <h2 class="text-[17px] font-bold mb-3.5">Where do you want to go?</h2>
+      <div class="space-y-2">
+        <button id="btn-bus" onclick="selectDest('Bus Bay Area','2 min','Low','Route B','busservice')" class="dest active w-full text-left border rounded-xl px-3.5 py-3 text-sm bg-[#eef7ff] border-[#2471a3] hover:border-[#2471a3] transition flex items-center gap-2" title="Select Bus Area to view the Bus Bay Area">
+          <span class="text-lg">🚌</span><span><b>Bus Bay Area</b> — Singapore → Malaysia</span>
+        </button>
+        <button onclick="selectDest('LTA Office','2 min','Low','Route A','carzone')" class="dest w-full text-left border border-[#d9e2ec] bg-white rounded-xl px-3.5 py-3 text-sm hover:border-[#2471a3] hover:bg-[#eef7ff] transition flex items-center gap-2">
+          <span class="text-lg">🏢</span><span><b>LTA Office</b></span><span class="ml-auto text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full font-bold"> &lt;10 ppl</span>
+        </button>
+        <button onclick="selectDest('Toilet','1 min','Low','Route A','carzone')" class="dest w-full text-left border border-[#d9e2ec] bg-white rounded-xl px-3.5 py-3 text-sm hover:border-[#2471a3] hover:bg-[#eef7ff] transition flex items-center gap-2">
+          <span class="text-lg">🚻</span><span><b>Toilet</b></span>
+        </button>
+        <button id="btn-park" onclick="selectDest('Temporary Parking','3 min','Medium','Route C','carzone')" class="dest w-full text-left border border-[#d9e2ec] bg-white rounded-xl px-3.5 py-3 text-sm hover:border-[#2471a3] hover:bg-[#eef7ff] transition flex items-center gap-2" title="Designated area for travellers entering and exiting Singapore">
+          <span class="text-lg">🅿️</span><span><b>Temporary Parking</b></span><span class="ml-auto text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded-full">Max 8 cars</span>
+        </button>
+        <!-- <p class="text-[11px] leading-snug text-slate-500 -mt-1 ml-1">Temporary Parking: designated area for travellers entering and exiting Singapore.</p> -->
+      </div>
+
+      <div class="mt-4 bg-[#f7fafc] rounded-xl p-3.5 border border-slate-100" id="result">
+        <strong class="block text-sm mb-1">Recommended: Route B</strong>
+        <p class="text-sm text-slate-600">Bus Area • 2 min walk</p>
+        <span class="inline-flex items-center gap-1 text-[11px] font-extrabold text-emerald-700 mt-1">● Live crowd: Low</span>
+        <button onclick="alert('Navigation started — follow Route B on the map.')" class="mt-3 w-full bg-[#102a43] hover:bg-[#153752] text-white rounded-xl py-2.5 text-sm font-bold transition">Start Navigation →</button>
+      </div>
+      <p class="mt-3 text-[11px] leading-relaxed text-slate-500">Tip: Tap <span class="inline-flex items-center justify-center w-4 h-4 bg-amber-300 rounded-full text-[10px]">💡</span> on the map for area info. Default is <b>Cluster</b>. Select <b>Bus Area</b> to view the Bus Bay Area. <b>Temporary Parking</b> for <b>travellers entering or exiting Singapore by car</b>.</p>
+    </section>
+
+    <!-- right: map -->
+    <section class="bg-white rounded-2xl p-4 lg:p-5 shadow-[0_4px_18px_rgba(0,0,0,.07)] flex flex-col">
+      <div class="map-tab-bar flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h2 class="text-[17px] font-bold flex items-center gap-2">Live Wayfinding Map <span class="text-[11px] font-extrabold text-emerald-600 flex items-center gap-1"><span class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span> LIVE</span></h2>
+        <div class="map-tabs flex items-center gap-1 bg-slate-100 p-1 rounded-full text-xs font-bold">
+          <button id="tab-cluster" onclick="switchMap('cluster')" class="px-3.5 py-1.5 rounded-full bg-[#102a43] text-white shadow">Cluster</button>
+          <button id="tab-busservice" onclick="switchMap('busservice')" class="px-3.5 py-1.5 rounded-full text-slate-600 hover:text-slate-900">Bus Service</button>
+          <button id="tab-carzone" onclick="switchMap('carzone')" class="px-3.5 py-1.5 rounded-full text-slate-600 hover:text-slate-900">Car Zone</button>
+        </div>
+      </div>
+
+      <div id="map" class="relative min-h-[520px] lg:min-h-[480px] overflow-hidden bg-[#eaf0f4] rounded-2xl border border-[#d7e0e7]">
+        <!-- traffic condition only - no numerical counts -->
+        <div class="absolute right-3 top-3 z-10 bg-white px-3 py-2 rounded-xl text-[11px] shadow-[0_2px_8px_rgba(0,0,0,.08)] border border-slate-100 flex items-center gap-2">
+          <span id="peak-badge" class="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full text-[10px] font-extrabold">LOW TRAFFIC</span>
+        </div>
+        <!-- hidden total kept for JS compatibility, not displayed -->
+        <span id="total" class="hidden">0</span>
+        <!-- refrain overlay - shown when isMaxReached() -->
+        <div id="refrain-overlay" class="hidden absolute inset-0 z-30 bg-white/90 backdrop-blur-sm flex items-center justify-center text-center p-6" style="background:rgba(255,255,255,0.92)">
+          <div>
+            <!-- <p class="text-[18px] font-extrabold text-slate-800 leading-snug">⛔ Refrain from coming to the checkpoint.</p>
+            <p class="text-[12px] leading-snug text-slate-700 mt-2">Maximum capacity reached — checkpoint is at full occupancy. Please delay your journey.</p>
+            <p class="text-[11px] leading-snug text-slate-600 mt-1">Peak: 5:30 AM – 9:00 AM &amp; 5:00 PM – 8:00 PM • Fri/Sat/Sun/PH delays expected</p> -->
+            <p class="text-[18px] font-extrabold text-slate-800 leading-snug">⛔ Please Avoid Travelling to the Checkpoint at This Time.</p>
+            <p class="text-[12px] leading-snug text-slate-700 mt-2">The checkpoint is at <b>maximum capacity</b>. Please <b>delay your journey</b> to avoid congestion.</p>
+            <p class="text-[11px] leading-snug text-slate-600 mt-1">Peak: 5:30 AM – 9:00 AM &amp; 5:00 PM – 8:00 PM • Fri/Sat/Sun/PH delays expected</p>
+          </div>
+        </div>
+
+        <!-- ===== VIEW: CLUSTER  (image2_2.png — EXIT + 3 Counters) — Default ===== -->
+        <div id="view-cluster" class="absolute inset-0 bg-[#f8fbfc]">
+          <div id="crowd-zones-cluster" class="absolute inset-0 pointer-events-none z-[4]"></div>
+          <!-- EXIT — top centre -->
+          <div class="absolute left-1/2 -translate-x-1/2 top-[2%] z-[6]">
+            <div class="relative bg-[#0a7a33] border border-[#065a27] rounded px-3 py-1.5 flex items-center gap-1.5 shadow">
+              <span class="text-white text-[13px]">🏃</span><span class="text-white text-[11px] font-extrabold tracking-widest">EXIT</span>
+              <button onclick="toggleTip(event,'tip-exit')" class="absolute -left-4 -top-2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition hidden">💡</button>
+              <div id="tip-exit" class="tooltip absolute left-1/2 top-full mt-2 w-52 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">EXIT — Way Out</b>
+                <span class="block">Follow signage to exit the cluster area. Keep to walkway.</span>
+                <button onclick="closeTip('tip-exit')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+          <!-- upper horizontal bar — reduced gap to EXIT -->
+          <div class="absolute left-[14%] right-[14%] top-[11%] h-[30px] lg:h-[34px] bg-[#d6eaf8] border border-slate-700 rounded-lg"></div>
+          <!-- 3 Counters — tightened spacing to match reference -->
+          <div class="absolute left-[4%] top-[30%] w-[28%]">
+            <div class="relative bg-[#d6eaf8] border border-slate-700 rounded-lg h-[36px] flex items-center justify-center">
+              <span class="bg-white rounded-lg px-3 py-1.5 text-xs font-bold shadow flex items-center gap-1">👤 Counter</span>
+              <button onclick="toggleTip(event,'tip-c1')" class="absolute -top-3 left-3 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button>
+              <div id="tip-c1" class="tooltip absolute left-1/2 bottom-full mb-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">Counter 1 — Immigration Check</b>
+                <span class="block font-semibold text-amber-200">Immigration Check — Have your passport or QR code ready.</span>
+                <button onclick="closeTip('tip-c1')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+            <div class="absolute left-0 right-0 top-[38px] flex justify-between px-1">
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c1-l1')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c1-l1" class="tooltip lane-tip absolute left-full ml-2 bottom-full mb-2 w-48 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 1 — Lane 1</b>
+                  <span class="block text-slate-200">Express Lane — <b>QR code only</b></span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c1-l1')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c1-l2')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c1-l2" class="tooltip lane-tip absolute left-full ml-2 bottom-full mb-2 w-48 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 1 — Lane 2</b>
+                  <span class="block text-slate-200">Express Lane — <b>Passport only</b></span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c1-l2')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+            </div>
+          </div>
+          <div class="absolute left-[36%] top-[30%] w-[28%]">
+            <div class="relative bg-[#d6eaf8] border border-slate-700 rounded-lg h-[36px] flex items-center justify-center">
+              <span class="bg-white rounded-lg px-3 py-1.5 text-xs font-bold shadow flex items-center gap-1">👤 Counter</span>
+              <button onclick="toggleTip(event,'tip-c2')" class="absolute -top-3 left-3 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button>
+              <div id="tip-c2" class="tooltip absolute left-1/2 bottom-full mb-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">Counter 2 — Immigration Check</b>
+                <span class="block font-semibold text-amber-200">Immigration Check — Have your passport or QR code ready.</span>
+                <button onclick="closeTip('tip-c2')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+            <div class="absolute left-0 right-0 top-[38px] flex justify-between px-1">
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c2-l1')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c2-l1" class="tooltip lane-tip absolute left-full ml-2 bottom-full mb-2 w-48 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 2 — Lane 1</b>
+                  <span class="block text-slate-200"><b>QR code only</b></span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c2-l1')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c2-l2')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c2-l2" class="tooltip lane-tip absolute left-full ml-2 bottom-full mb-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 2 — Lane 2</b>
+                  <span class="block text-slate-200">SAL Lane — For travellers with children, pregnant travellers and senior travellers</span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c2-l2')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c2-l3')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c2-l3" class="tooltip lane-tip absolute left-full ml-2 bottom-full mb-2 w-48 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 2 — Lane 3</b>
+                  <span class="block text-slate-200">SC — QR code and passport</span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c2-l3')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+            </div>
+          </div>
+          <div class="absolute right-[4%] top-[30%] w-[28%]">
+            <div class="relative bg-[#d6eaf8] border border-slate-700 rounded-lg h-[36px] flex items-center justify-center">
+              <span class="bg-white rounded-lg px-3 py-1.5 text-xs font-bold shadow flex items-center gap-1">👤 Counter</span>
+              <button onclick="toggleTip(event,'tip-c3')" class="absolute -top-3 left-3 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button>
+              <div id="tip-c3" class="tooltip absolute left-1/2 bottom-full mb-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">Counter 3 — Immigration Check</b>
+                <span class="block font-semibold text-amber-200">Immigration Check — Have your passport or QR code ready.</span>
+                <button onclick="closeTip('tip-c3')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+            <div class="absolute left-0 right-0 top-[38px] flex justify-between px-1">
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c3-l1')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c3-l1" class="tooltip lane-tip absolute left-full ml-2 bottom-full mb-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 3 — Lane 1</b>
+                  <span class="block text-slate-200">Express Lane — QR code, all travellers</span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c3-l1')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="relative w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded">
+                <button onclick="toggleTip(event,'tip-c3-l2')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[12px] shadow hover:scale-110 transition">💡</button>
+                <div id="tip-c3-l2" class="tooltip lane-tip absolute right-full mr-2 bottom-full mb-2 w-48 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                  <b class="block mb-1">Counter 3 — Lane 2</b>
+                  <span class="block text-slate-200">All Travellers — TD only</span>
+                  <span class="block mt-1 font-semibold text-amber-200 text-[10px]">Immigration Check — Have your passport or QR code ready.</span>
+                  <button onclick="closeTip('tip-c3-l2')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+                </div>
+              </div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+              <div class="w-[5px] h-[130px] bg-[#d6eaf8] border border-slate-500 rounded"></div>
+            </div>
+          </div>
+          <div class="absolute left-[3%] right-[3%] bottom-[4%] h-[52px] bg-[#d6eaf8] border border-slate-700 rounded-xl"></div>
+        </div>
+
+        <!-- ===== VIEW: BUS SERVICE  (image3.png — CW / SBS / Bus Area with dashed loop) ===== -->
+        <div id="view-busservice" class="absolute inset-0 bg-[#f8fbfc] hidden">
+          <div id="crowd-zones-busservice" class="absolute inset-0 pointer-events-none z-[4]"></div>
+          <!-- CW — top left (image3 closely) -->
+          <div class="absolute left-[32%] top-[4%] z-[6]">
+            <div class="relative bg-white rounded-lg shadow-[0_2px_8px_rgba(0,0,0,.08)] border border-slate-700 px-3 py-1.5 flex items-center justify-center">
+              <span class="text-[11px] font-bold tracking-wide">CW</span>
+              <button onclick="toggleTip(event,'tip-cw-bus')" class="absolute -left-4 -top-2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition" aria-label="Info">💡</button>
+              <div id="tip-cw-bus" class="tooltip absolute left-[45%] top-full mt-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">CW — Causeway Link</b>
+                <span class="block">Services <b>CW1 / CW2 / CW5</b> to MY checkpoint.</span>
+                <span class="block mt-1">Operated by Causeway Link. Frequency 10–20 mins.</span>
+                <button onclick="closeTip('tip-cw-bus')" class="mt-2 text-amber-300 text-[11px] font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+          <!-- SBS — vertical on right mid (image3 closely) -->
+          <div class="absolute left-[73%] top-[48%] z-[6]">
+            <div class="relative bg-white rounded-lg shadow-[0_2px_8px_rgba(0,0,0,.08)] border border-slate-700 px-2 py-2 flex flex-col items-center">
+              <span class="vertical text-[11px] font-bold tracking-wide">SBS</span>
+              <button onclick="toggleTip(event,'tip-sbs-bus')" class="absolute -right-5 -top-0.5 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition" aria-label="Info">💡</button>
+              <div id="tip-sbs-bus" class="tooltip absolute left-1/2 top-full mt-2 w-56 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">SBS — SBS Transit</b>
+                <span class="block">Services <b>160 / 170 / 170X / 950</b> to MY checkpoint.</span>
+                <span class="block mt-1">Operated by SBS Transit. Frequency 15–25 mins.</span>
+                <button onclick="closeTip('tip-sbs-bus')" class="mt-2 text-amber-300 text-[11px] font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+          <!-- Dashed connectors — strictly follow image3.png -->
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="absolute inset-0 w-full h-full pointer-events-none z-[5]" style="overflow:visible">
+            <!-- CW vertical dashed straight down to Bus Area top -->
+            <path d="M 37.5 8.5 C 37.5 14, 38.5 18, 43.5 24 L 43.8 30" stroke="#334155" stroke-width="0.9" stroke-dasharray="5 5" fill="none" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+            <!-- Short double overlap near Bus Area top (mirrors image) -->
+            <path d="M 44.8 30 L 45.2 36" stroke="#334155" stroke-width="0.9" stroke-dasharray="5 5" fill="none" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+            <!-- Small horizontal from SBS left to U -->
+            <path d="M 73 51 H 68.5" stroke="#334155" stroke-width="0.9" stroke-dasharray="5 5" fill="none" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+            <!-- Large U loop — from Bus Area left edge looping left/down/around bottom up to SBS level -->
+            <path d="M 38 31 L 29 31 C 24 31, 22.5 31.5, 22.5 34 L 22.5 62 C 22.5 76, 32 85, 53 85 C 64 85, 69.5 80, 69.5 68 L 69.5 52" stroke="#334155" stroke-width="0.9" stroke-dasharray="5 5" fill="none" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+          </svg>
+          <!-- Bus Area — centre (slightly lower to allow CW line) -->
+          <div class="absolute left-[38%] top-[29%] z-[6]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-4 py-2.5 flex items-center gap-2">
+              <span class="text-sm">🚌</span><span class="text-xs font-bold">Bus Area</span>
+              <button onclick="toggleTip(event,'tip-bus-busservice')" class="absolute -top-3 left-1/2 -translate-x-1/2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition" aria-label="Info">💡</button>
+              <div id="tip-bus-busservice" class="tooltip absolute left-1/2 top-full mt-1 w-60 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">🚌 Bus Area</b>
+                <span class="block">Bus services: <b>160 / 170 / 170X / 950</b></span>
+                <span class="block mt-1">All listed bus services go to the <b>MY checkpoint</b>.</span>
+                <span class="block mt-1">Estimated travel time: <b>10–25 minutes</b>, depending on traffic conditions.</span>
+                <button onclick="closeTip('tip-bus-busservice')" class="mt-2 text-amber-300 text-[11px] font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+          <!-- Toilet vertical — bottom left to match image3 -->
+          <div class="absolute left-[8%] bottom-[18%]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-2.5 py-3 flex flex-col items-center gap-1">
+              <span class="vertical text-[12px] font-bold tracking-wide">Toilet</span>
+              <span class="text-[11px]">🚻</span>
+              <button onclick="toggleTip(event,'tip-toilet-busservice')" class="absolute -top-2 -right-3 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition" aria-label="Info">💡</button>
+              <div id="tip-toilet-busservice" class="tooltip side-tip absolute left-full ml-3 top-[42%] w-64 bg-slate-900 text-white text-[12px] leading-relaxed p-4 rounded-xl shadow-xl z-20 border border-slate-700">
+                <b class="block mb-1.5 text-white text-[13px]">🚻 Toilet — Bus Service</b>
+                <span class="block text-slate-100">Both Men's and Women's Toilets are available and located at the nearest accessible location.</span>
+                <button onclick="closeTip('tip-toilet-busservice')" class="mt-3 text-amber-300 text-[11px] font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== VIEW: CAR ZONE  (formerly Bus / Central — Image 1) ===== -->
+        <div id="view-carzone" class="absolute inset-0 hidden">
+          <!-- crowd density zones (carzone) — semi-transparent, consistent with Live Crowd Monitoring -->
+          <div id="crowd-zones-carzone" class="absolute inset-0 pointer-events-none z-[4]"></div>
+          <!-- roads -->
+          <div class="absolute left-[48%] top-[4%] w-[11%] lg:w-[9%] bottom-[18%] bg-[#d6eaf8] border border-slate-700 rounded-xl"></div>
+          <div class="absolute right-[14%] top-[4%] w-[7%] h-[18%] bg-[#d6eaf8] border border-slate-700 rounded-lg"></div>
+          <div class="absolute right-[7%] top-[26%] w-[30%] h-[40px] bg-[#d6eaf8] border border-slate-700 rounded-lg"></div>
+          <div class="absolute left-[17%] top-[48%] w-[28%] h-[40px] bg-[#d6eaf8] border border-slate-700 rounded-lg"></div>
+          <div class="absolute left-[38%] top-[62%] w-[7%] h-[16%] bg-[#d6eaf8] border border-slate-700 rounded-lg"></div>
+          <div class="absolute left-[3%] right-[3%] bottom-[6%] h-[62px] bg-[#d6eaf8] border border-slate-700 rounded-xl"></div>
+
+          <!-- Temp Parking vertical -->
+          <div class="absolute left-[16%] top-[30%]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-2 py-3 flex flex-col items-center gap-1">
+              <span class="vertical text-[12px] font-bold">Temp Parking</span>
+              <span class="text-[11px]">🅿️</span>
+              <!-- <button onclick="toggleTip(event,'tip-parking')" class="absolute -top-2 -left-3 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button> -->
+              <button onclick="toggleTip(event,'tip-parking')" class="absolute -top-4 -left-0.5 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button>
+              <div id="tip-parking" class="tooltip absolute left-full ml-2 top-1/2 -translate-y-1/2 translate-x-0 w-52 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20 !translate-x-0 !left-full">
+                <b class="block mb-1">🅿️ Temp Parking — Max 8 cars</b>
+                Maximum capacity is 8 cars. Short-term parking, 2-hour limit. CCTV monitored.
+                <span class="block mt-1.5 text-amber-300 text-[10px] font-bold" id="parking-availability">Loading…</span>
+                <button onclick="closeTip('tip-parking')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- LTA Office top -->
+          <div class="absolute left-[31%] top-[14%]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-3 py-2 flex items-center gap-1.5">
+              <span class="text-[11px]">🏢</span><span class="text-xs font-bold">LTA Office</span>
+              <button onclick="toggleTip(event,'tip-lta-top')" class="absolute -top-2 -right-2 w-6 h-6 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[11px] shadow opacity-0">💡</button>
+              <div id="tip-lta-top" class="tooltip absolute left-1/2 top-full mt-2 w-52 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">🏢 LTA Office (North)</b>
+                Usually &lt;10 people. Peak hours may be busier.
+                <span id="lta-peak-note-top" class="block mt-1 text-amber-300"></span>
+                <button onclick="closeTip('tip-lta-top')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Toilet center -->
+          <div class="absolute left-[34%] top-[40%]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-3 py-2 flex items-center gap-1.5">
+              <span class="text-[11px]">🚻</span><span class="text-xs font-bold">Toilet</span>
+              <button onclick="toggleTip(event,'tip-toilet-center')" class="absolute -top-2 -left-3 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button>
+              <div id="tip-toilet-center" class="tooltip absolute left-1/2 top-full mt-2 w-52 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">🚻 Toilet — Central</b>
+                Both Men's and Women's Toilets are available and located at the nearest accessible location.
+                <button onclick="closeTip('tip-toilet-center')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Toilet right -->
+          <div class="absolute right-[12%] top-[36%]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-3 py-2 flex items-center gap-1.5">
+              <span class="text-[11px]">🚻</span><span class="text-xs font-bold">Toilet</span>
+              <!-- <button onclick="toggleTip(event,'tip-toilet-right')" class="absolute -top-2 -right-2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button> -->
+              <button onclick="toggleTip(event,'tip-toilet-right')" class="absolute -top-1 -right-4 w-7 h-7 bg-amber-300 border-2 border-white rounded-full flex items-center justify-center text-[13px] shadow hover:scale-110 transition">💡</button>              
+              <div id="tip-toilet-right" class="tooltip absolute left-1/2 top-full mt-2 w-52 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">🚻 Toilet — East</b>
+                Both Men's and Women's Toilets are available and located at the nearest accessible location.
+                <button onclick="closeTip('tip-toilet-right')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- LTA Office bottom -->
+          <div class="absolute right-[14%] bottom-[22%]">
+            <div class="relative bg-white rounded-xl shadow-[0_3px_10px_rgba(0,0,0,.1)] border border-slate-100 px-3 py-2 flex items-center gap-1.5">
+              <span class="text-[11px]">🏢</span><span class="text-xs font-bold">LTA Office</span>
+              <button onclick="toggleTip(event,'tip-lta-bottom')" class="absolute -top-2 -right-2 w-7 h-7 bg-amber-300 border-2 border-white rounded-full hidden">💡</button>
+              <div id="tip-lta-bottom" class="tooltip absolute left-1/2 bottom-full mb-2 w-52 bg-slate-900 text-white text-[11px] leading-snug p-3 rounded-xl shadow-xl z-20">
+                <b class="block mb-1">🏢 LTA Office (South)</b>
+                Enquiries, permits & assistance. Low occupancy off-peak.
+                <span id="lta-peak-note-bottom" class="block mt-1 text-amber-300"></span>
+                <button onclick="closeTip('tip-lta-bottom')" class="mt-2 text-amber-300 font-bold">Close ✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- clickable hotspots for LTA -->
+          <button onclick="toggleTip(event,'tip-lta-top')" class="absolute left-[31%] top-[14%] w-28 h-10 rounded-xl" aria-label="LTA top info"></button>
+          <button onclick="toggleTip(event,'tip-lta-bottom')" class="absolute right-[14%] bottom-[22%] w-28 h-10 rounded-xl" aria-label="LTA bottom info"></button>
+        </div>
+
+        <!-- route line -->
+        <div class="route" id="route"></div>
+      </div>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+        <span class="flex items-center gap-1"><span class="w-3 h-3 bg-[#d6eaf8] border border-slate-700 rounded"></span> Walkway / Road</span>
+        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full border" style="background:rgba(16,185,129,.35);border-color:rgba(16,185,129,.65)"></span> Low Traffic</span>
+        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full border" style="background:rgba(245,158,11,.35);border-color:rgba(245,158,11,.65)"></span> Medium Traffic</span>
+        <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full border" style="background:rgba(239,68,68,.35);border-color:rgba(239,68,68,.65)"></span> High Traffic</span>
+        <span class="flex items-center gap-1"><span class="w-6 h-1.5 bg-[#2471a3] rounded-full"></span> Recommended route</span>
+        <span class="ml-auto text-slate-400 hidden sm:inline">Tap 💡 for info</span>
+      </div>
+      <p class="mt-1.5 text-[10px] leading-snug text-slate-400">Transparent circles indicate traffic conditions while keeping the map visible.<br/> Colours match the Live Crowd Monitoring status: <span class="text-emerald-600 font-bold">Green = Low Traffic</span> · <span class="text-amber-600 font-bold">Amber = Medium Traffic</span> · <span class="text-red-600 font-bold">Red = High Traffic</span>.</p>
+      <div id="map-max-banner" class="hidden mt-3 bg-red-50 border border-red-200 rounded-xl px-3.5 py-3 text-center">
+        <!-- <p class="text-xs font-extrabold text-red-800">⛔ Refrain from coming to the checkpoint.</p>
+        <p class="text-[11px] leading-snug text-red-700 mt-1">Maximum capacity reached — checkpoint is at full occupancy. Please delay your journey.</p>
+        <p class="text-[10px] leading-snug text-slate-600 mt-1">Peak: 5:30 AM – 9:00 AM &amp; 5:00 PM – 8:00 PM • Fri/Sat/Sun/PH delays expected</p> -->
+        <p class="text-xs font-extrabold text-red-800">⛔ Please Avoid Travelling to the Checkpoint at This Time.</p>
+        <p class="text-[11px] leading-snug text-red-700 mt-1">The checkpoint is at <b>maximum capacity</b>. Please <b>delay your journey</b> to avoid congestion.</p>
+        <p class="text-[10px] leading-snug text-slate-600 mt-1"><b>Peak:</b> 5:30 AM – 9:00 AM &amp; 5:00 PM – 8:00 PM • <b>Fri/Sat/Sun/PH delays expected</b></p>
+
+      </div>
+    </section>
+  </div>
+
+  <!-- bottom: crowd monitoring -->
+  <section class="bg-white rounded-2xl p-5 shadow-[0_4px_18px_rgba(0,0,0,.07)] mt-4">
+    <div class="flex items-center justify-between gap-3 mb-3">
+      <h2 class="text-[17px] font-bold">Live Crowd Monitoring</h2>
+      <span class="text-[11px] font-bold text-slate-500 flex items-center gap-1"><span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span> Updates every 2mins</span>
+    </div>
+    <div id="traffic" class="divide-y divide-slate-100"></div>
+    <!-- <div id="refrain-traffic" class="hidden mt-3 bg-red-50 border border-red-200 rounded-xl px-3.5 py-3 text-center">
+      <p class="text-xs font-extrabold text-red-800">⛔ Refrain from coming to the checkpoint.<br><span class="font-bold">Maximum human count reached</span></p>
+    </div>
+    <div id="max-capacity-banner" class="hidden mt-3 bg-red-50 border border-red-200 rounded-xl px-3.5 py-3 text-center">
+      <p class="text-xs font-extrabold text-red-800">Refrain from coming to the checkpoint.</p>
+    </div> -->
+    <div id="refrain-traffic" class="hidden mt-3 bg-red-50 border border-red-200 rounded-xl px-3.5 py-3 text-center">
+      <p class="text-xs font-extrabold text-red-800">⛔ Please Avoid Travelling to the Checkpoint at This Time<br><span class="font-bold">The checkpoint is at maximum capacity. Please delay your journey to avoid congestion.</span></p>
+    </div>
+    <div id="max-capacity-banner" class="hidden mt-3 bg-red-50 border border-red-200 rounded-xl px-3.5 py-3 text-center">
+      <p class="text-xs font-extrabold text-red-800">Please Avoid Travelling to the Checkpoint at This Time</p>
+    </div>
+    <p id="traffic-note" class="mt-3 text-[11px] text-slate-500">LTA Office stays <b>&lt;10 people</b> off-peak. Peak hours: <b>5:30–9:00 AM & 5:00–8:00 PM</b> — occupancy may rise temporarily. Temporary Parking capacity: <b>8 cars max</b>.</p>
+    <div id="delay-banner" class="hidden mt-3 flex gap-2 items-start bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-3">
+      <span class="text-amber-600 text-sm">⚠️</span>
+      <div>
+        <p class="text-xs font-extrabold text-amber-800">Expected Delays</p>
+        <p class="text-[11px] leading-snug text-amber-700 mt-0.5">Today is a high-traffic day (<span id="delay-day"></span>). On Fridays, Saturdays, Sundays and Public Holidays, higher traffic is expected, and additional waiting time may occur. Please plan extra time.</p>
+      </div>
+    </div>
+    <p class="mt-2 text-[11px] leading-snug text-slate-500 border-t border-slate-100 pt-2">⚠️ <b>Fridays, Saturdays, Sundays and Public Holidays:</b> higher traffic is expected, and additional waiting time may occur.</p>
+  </section>
+
+  <footer class="text-center text-[11px] text-slate-400 py-6">Gateway Guide POC • Tailwind CSS • Mobile responsive • Team Catalyst • Map switches between Cluster, Bus Service and Car Zone</footer>
+</div>
+
+<script>
+const areas = [
+  {name:'Bus Area', people:38, icon:'🚌'},
+  {name:'LTA Office', people:7, icon:'🏢'},
+  {name:'Toilet', people:5, icon:'🚻', isToilet:true, maxQueue:15},
+  {name:'Counter Area', people:34, icon:'👮', hiddenDest:true},
+  {name:'Temporary Parking', people:5, icon:'🅿️', isParking:true, capacity:8}
+];
+
+// crowd density — true circles centred naturally (diameter based on width only, so always 1:1)
+ // colour matches Live Crowd Monitoring: Low=Green, Medium=Amber, High=Red
+const zoneConfigs = [
+  // Cluster view — just-nice rectangles tightly wrapping each counter + lanes
+  { area:'Counter Area', view:'cluster', left:'3.8%', top:'29.2%', width:'28.4%', height:'44%', isRect:true, label:'Counter 1' },
+  { area:'Counter Area', view:'cluster', left:'35.8%', top:'29.2%', width:'28.4%', height:'44%', isRect:true, label:'Counter 2' },
+  { area:'Counter Area', view:'cluster', left:'67.8%', top:'29.2%', width:'28.4%', height:'44%', isRect:true, label:'Counter 3' },
+  // Bus Service view — Toilet heatmap almost same size as shape, same size for Low/Medium/High
+  { area:'Bus Area', view:'busservice', left:'37.2%', top:'27.5%', width:'19%', height:'10%', isRect:true, label:'Bus Area' },
+  { area:'Toilet', view:'busservice', left:'7.9%', top:'69.8%', width:'7.4%', height:'14.8%', isRect:true, label:'Toilet' },
+  // Car Zone view — just-nice rectangles hugging each building footprint
+  { area:'Temporary Parking', view:'carzone', left:'15.2%', top:'29%', width:'7.2%', height:'16%', isRect:true, label:'Temp Parking' },
+  { area:'LTA Office', view:'carzone', left:'30.4%', top:'13.2%', width:'13.6%', height:'8.5%', isRect:true, label:'LTA Office N' },
+  { area:'LTA Office', view:'carzone', left:'72.8%', top:'71.2%', width:'12.5%', height:'8.8%', isRect:true, label:'LTA Office S', idSuffix:'-south' },
+  { area:'Toilet', view:'carzone', left:'33.4%', top:'39.2%', width:'11%', height:'9%', isRect:true, label:'Toilet C', idSuffix:'-central' },
+  { area:'Toilet', view:'carzone', left:'77.8%', top:'35.2%', width:'11%', height:'9%', isRect:true, label:'Toilet E', idSuffix:'-east' }
+];
+
+function zoneStyleForLabel(label){
+  // matches Live Crowd Monitoring palette — semi-transparent so map stays visible
+  if(label==='Low') return {bg:'rgba(16,185,129,0.32)', border:'rgba(16,185,129,0.62)', glow:'0 0 18px rgba(16,185,129,0.25)'};
+  if(label==='Medium') return {bg:'rgba(245,158,11,0.36)', border:'rgba(245,158,11,0.70)', glow:'0 0 18px rgba(245,158,11,0.28)'};
+  return {bg:'rgba(239,68,68,0.34)', border:'rgba(239,68,68,0.62)', glow:'0 0 20px rgba(239,68,68,0.30)'}; // High
+}
+function zoneScaleForLabel(label){
+  // keep same sizes for Low/Medium/High — only color changes
+  return 1.0;
+}
+
+function renderCrowdZones(){
+  // render true circles only — width + aspect-ratio guarantees 1:1 (not oval), centred via translate(-50%,-50%)
+  const maxReached = isMaxReached();
+  ['cluster','busservice','carzone'].forEach(view=>{
+    const container = document.getElementById('crowd-zones-'+view);
+    if(!container) return;
+    if(maxReached){ container.style.display='none'; return; }
+    container.style.display='';
+    container.innerHTML='';
+    zoneConfigs.filter(z=>z.view===view).forEach(cfg=>{
+      const area = areas.find(a=>a.name===cfg.area);
+      if(!area) return;
+      const [label] = status(area.people, area);
+      const style = zoneStyleForLabel(label);
+      const scale = zoneScaleForLabel(label);
+      const el = document.createElement('div');
+      const isRect = !!cfg.isRect;
+      el.className = 'crowd-zone' + (isRect ? ' rect' : '') + (label==='High' ? ' pulse' : '');
+      el.dataset.area = cfg.area;
+      el.dataset.level = label;
+      el.title = cfg.label + ' · ' + label;
+      if(isRect){
+        // rectangle with smooth edges — same size for Low/Medium/High, only color changes; responsive via %
+        el.style.left = cfg.left;
+        el.style.top = cfg.top;
+        el.style.width = cfg.width;
+        el.style.height = cfg.height;
+        el.style.background = style.bg;
+        el.style.border = '2px solid ' + style.border;
+        el.style.boxShadow = style.glow;
+        el.style.transform = 'none';
+        el.style.transformOrigin = 'center center';
+      } else {
+        // true circle: width only defines diameter, height follows aspect-ratio 1/1, positioned by centre + translate
+        el.style.left = cfg.cx;
+        el.style.top = cfg.cy;
+        el.style.width = cfg.diam;
+        el.style.background = style.bg;
+        el.style.border = '2px solid ' + style.border;
+        el.style.boxShadow = style.glow;
+        // scale by crowd level (area affected) while keeping centre anchored
+        el.style.transform = 'translate(-50%, -50%) scale('+scale+')';
+        el.style.transformOrigin = 'center center';
+      }
+      container.appendChild(el);
+    });
+  });
+}
+
+// SG Public Holidays 2026 (simplified)
+const publicHolidays2026 = ['2026-01-01','2026-02-17','2026-02-18','2026-04-03','2026-05-01','2026-05-31','2026-06-15','2026-08-09','2026-08-14','2026-10-20','2026-11-10','2026-12-25'];
+function isPublicHoliday(d=new Date()){
+  const s = d.toISOString().slice(0,10);
+  return publicHolidays2026.includes(s);
+}
+function isHighTrafficDay(d=new Date()){
+  const day = d.getDay(); // 0 Sun, 5 Fri, 6 Sat
+  return day===0 || day===5 || day===6 || isPublicHoliday(d);
+}
+function isPeakHours(date=new Date()){
+  const h = date.getHours();
+  const m = date.getMinutes();
+  const mins = h*60 + m;
+  const morningStart = 5*60+30; // 5:30
+  const morningEnd = 9*60; // 9:00
+  const eveningStart = 17*60; // 17:00
+  const eveningEnd = 20*60; // 20:00
+  return (mins >= morningStart && mins <= morningEnd) || (mins >= eveningStart && mins <= eveningEnd);
+}
+function isMaxReached(){
+  const parking = areas.find(a=>a.isParking);
+  if(parking && parking.people >= 8) return true;
+  return areas.some(a=> a.people >=80);
+}
+
+function status(n, area){
+  if(area && area.isParking){
+    // capacity 8 - show High instead of Full to match spec
+    if(n <= 3) return ['Low','bg-emerald-100 text-emerald-700'];
+    if(n <= 6) return ['Medium','bg-amber-100 text-amber-800'];
+    return ['High','bg-red-100 text-red-700'];
+  }
+  if(area && area.isToilet){
+    // Toilet: High >15, otherwise Low/Medium based on queue
+    if(n > 15) return ['High','bg-red-100 text-red-700'];
+    if(n > 5) return ['Medium','bg-amber-100 text-amber-800'];
+    return ['Low','bg-emerald-100 text-emerald-700'];
+  }
+  if(n < 30) return ['Low','bg-emerald-100 text-emerald-700'];
+  if(n < 60) return ['Medium','bg-amber-100 text-amber-800'];
+  return ['High','bg-red-100 text-red-700'];
+}
+
+function renderTraffic(){
+  const box=document.getElementById('traffic');
+  box.innerHTML='';
+  let totalPeople=0;
+  let parkingUsed=0;
+  const maxReached = isMaxReached();
+  // Categories that should show only Low/Medium/High without numbers (per spec)
+  const statusOnly = ['Bus Area','Bus Bay Area','LTA Office','Counter Area','Temporary Parking','Toilet'];
+  areas.forEach(a=>{
+    const isParking = !!a.isParking;
+    const isToilet = !!a.isToilet;
+    const [label,cls]=status(a.people, a);
+    if(isParking) parkingUsed = a.people;
+    else totalPeople+=a.people;
+
+    // Show only Low/Medium/High for specified categories (no numerical counts)
+    if(statusOnly.includes(a.name) || isToilet || isParking){
+      box.innerHTML += `<div class="flex items-center justify-between py-3">
+        <span class="text-sm flex items-center gap-2"><span>${a.icon}</span> ${a.name}</span>
+        <span class="flex items-center gap-2"><span class="px-2.5 py-1 rounded-full text-[11px] font-extrabold ${cls}">${label}</span></span>
+      </div>`;
+      return;
+    }
+
+    let extra='';
+    if(a.name==='LTA Office'){
+      extra = !isPeakHours() ? '<span class="text-[10px] text-slate-400 ml-2">off-peak &lt;10</span>' : '<span class="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full ml-2">peak 5:30–9 / 17–20</span>';
+    }
+    if(a.isParking){
+      const avail = Math.max(0, a.capacity - a.people);
+      extra = `<span class="text-[10px] ${avail===0?'bg-red-100 text-red-700':'bg-slate-100 text-slate-600'} px-1.5 py-0.5 rounded-full ml-2">${avail} spots left • Max ${a.capacity}</span>`;
+    }
+    const unit = isParking ? 'cars' : 'people';
+    const countLabel = isParking ? `${a.people}/${a.capacity}` : a.people;
+    box.innerHTML += `<div class="flex items-center justify-between py-3">
+      <span class="text-sm flex items-center gap-2"><span>${a.icon}</span> ${a.name} ${extra}</span>
+      <span class="flex items-center gap-2"><b class="text-sm">${countLabel}</b><span class="text-xs text-slate-500">${unit}</span><span class="px-2.5 py-1 rounded-full text-[11px] font-extrabold ${cls}">${label}</span></span>
+    </div>`;
+  });
+  // Map: #refrain-overlay over view-lvl1/view-bus, hiding route/dots
+  const refrainOverlay = document.getElementById('refrain-overlay');
+  if(refrainOverlay){
+    if(maxReached) refrainOverlay.classList.remove('hidden');
+    else refrainOverlay.classList.add('hidden');
+  }
+  const mapMaxBanner = document.getElementById('map-max-banner');
+  if(mapMaxBanner){
+    if(maxReached) mapMaxBanner.classList.remove('hidden');
+    else mapMaxBanner.classList.add('hidden');
+  }
+  const routeEl = document.getElementById('route');
+  if(routeEl && maxReached) routeEl.classList.remove('show');
+  // crowd zones — hidden via renderCrowdZones when maxReached, but ensure containers toggled
+  renderCrowdZones();
+  // Monitoring: #traffic + #traffic-note hidden, #refrain-traffic shown
+  const trafficEl = document.getElementById('traffic');
+  const trafficNote = document.getElementById('traffic-note');
+  const refrainTraffic = document.getElementById('refrain-traffic');
+  if(maxReached){
+    if(trafficEl) trafficEl.classList.add('hidden');
+    if(trafficNote) trafficNote.classList.add('hidden');
+    if(refrainTraffic) refrainTraffic.classList.remove('hidden');
+  } else {
+    if(trafficEl) trafficEl.classList.remove('hidden');
+    if(trafficNote) trafficNote.classList.remove('hidden');
+    if(refrainTraffic) refrainTraffic.classList.add('hidden');
+  }
+  // Compatibility: also toggle max-capacity-banner
+  const maxBanner = document.getElementById('max-capacity-banner');
+  if(maxBanner){
+    if(maxReached) maxBanner.classList.remove('hidden');
+    else maxBanner.classList.add('hidden');
+  }
+  // Where-to-go: #result replaced stored in dataset.normalHtml
+  const resultEl = document.getElementById('result');
+  if(resultEl){
+    if(!resultEl.dataset.normalHtml){
+      resultEl.dataset.normalHtml = resultEl.innerHTML;
+    }
+    // if(maxReached){
+    //   resultEl.innerHTML = `<div class="bg-red-50 border border-red-200 rounded-xl p-3.5"><p class="text-xs font-extrabold text-red-800">⛔ Refrain from coming to the checkpoint.</p><p class="text-[11px] leading-snug text-red-700 mt-1">Maximum human count reached — please delay your visit</p><button disabled class="mt-3 w-full bg-slate-300 text-slate-500 rounded-xl py-2.5 text-sm font-bold cursor-not-allowed">Start Navigation →</button></div>`;
+    // } else {
+    //   if(resultEl.innerHTML.includes('Refrain from coming to the checkpoint')){
+    //     resultEl.innerHTML = resultEl.dataset.normalHtml;
+    //   }
+    if(maxReached){
+      resultEl.innerHTML = `<div class="bg-red-50 border border-red-200 rounded-xl p-3.5"><p class="text-xs font-extrabold text-red-800">⛔ Please Avoid Travelling to the Checkpoint at This Time.</p><p class="text-[11px] leading-snug text-red-700 mt-1">Maximum human count reached — please delay your visit</p><button disabled class="mt-3 w-full bg-slate-300 text-slate-500 rounded-xl py-2.5 text-sm font-bold cursor-not-allowed">Start Navigation →</button></div>`;
+    } else {
+      if(resultEl.innerHTML.includes('Please Avoid Travelling to the Checkpoint at This Time.')){
+        resultEl.innerHTML = resultEl.dataset.normalHtml;
+      }
+    }
+  }
+  document.getElementById('total').textContent=totalPeople;
+  // parking availability in tooltip
+  const parking = areas.find(a=>a.isParking);
+  if(parking){
+    const avail = Math.max(0, parking.capacity - parking.people);
+    const availEl = document.getElementById('parking-availability');
+    if(availEl) availEl.textContent = avail===0 ? '● Full — 0 spots left (8/8)' : `● ${avail} spots left — ${parking.people}/8 cars`;
+  }
+  const peakBadge=document.getElementById('peak-badge');
+  // Traffic condition — Peak 5:30-9 & 17-20 always HIGH (red). Off-peak reflects live Low/Medium/High.
+  // Low → Green, Medium → Amber, High → Red (matches Live Crowd Monitoring)
+  const isPeak = isPeakHours();
+  const isHighDay = isHighTrafficDay();
+  if(peakBadge){
+    if(isPeak){
+      // Peak window (5:30-9 AM & 5-8 PM) — always HIGH, even on normal days; especially high on Fri/Sat/Sun/PH
+      peakBadge.textContent='HIGH TRAFFIC';
+      peakBadge.className='bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-[10px] font-extrabold';
+    } else {
+      // Off-peak: show actual congestion Low/Medium (or High if crowd spikes)
+      let worst='Low';
+      areas.forEach(a=>{ const [lbl]=status(a.people,a); if(lbl==='High') worst='High'; else if(lbl==='Medium' && worst!=='High') worst='Medium'; });
+      // Fri/Sat/Sun/PH off-peak is still busier — promote Low to Medium
+      if(isHighDay && worst==='Low') worst='Medium';
+      if(worst==='High'){
+        peakBadge.textContent='HIGH TRAFFIC';
+        peakBadge.className='bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-[10px] font-extrabold';
+      } else if(worst==='Medium'){
+        peakBadge.textContent='MEDIUM TRAFFIC';
+        peakBadge.className='bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full text-[10px] font-extrabold';
+      } else {
+        peakBadge.textContent='LOW TRAFFIC';
+        peakBadge.className='bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full text-[10px] font-extrabold';
+      }
+    }
+  }
+  // delay banner for Fri/Sat/Sun/PH
+  const delayBanner=document.getElementById('delay-banner');
+  const delayDay=document.getElementById('delay-day');
+  if(isHighDay){
+    delayBanner.classList.remove('hidden');
+    const opts={weekday:'long'};
+    const dayName=new Date().toLocaleDateString('en-SG',opts);
+    const ph = isPublicHoliday() ? 'Public Holiday' : dayName;
+    delayDay.textContent=ph;
+  } else {
+    delayBanner.classList.add('hidden');
+  }
+  const note = isPeakHours() ? 'Peak hours (5:30–9:00 AM & 5:00–8:00 PM) — higher traffic expected.' + (isHighTrafficDay() ? ' Fri/Sat/Sun/PH delay expected.' : '') : 'Off-peak — LTA Office low occupancy (<10).';
+  const n1=document.getElementById('lta-peak-note-top');
+  const n2=document.getElementById('lta-peak-note-bottom');
+  if(n1) n1.textContent = note;
+  if(n2) n2.textContent = note;
+}
+renderTraffic();
+
+function switchMap(view){
+  // Normalise legacy view names for backwards compat
+  if(view==='lvl1') view='cluster';
+  if(view==='bus') view='carzone';
+  document.getElementById('view-cluster').classList.toggle('hidden', view!=='cluster');
+  document.getElementById('view-busservice').classList.toggle('hidden', view!=='busservice');
+  document.getElementById('view-carzone').classList.toggle('hidden', view!=='carzone');
+  document.getElementById('tab-cluster').className = view==='cluster' ? 'px-3.5 py-1.5 rounded-full bg-[#102a43] text-white shadow' : 'px-3.5 py-1.5 rounded-full text-slate-600 hover:text-slate-900';
+  document.getElementById('tab-busservice').className = view==='busservice' ? 'px-3.5 py-1.5 rounded-full bg-[#102a43] text-white shadow' : 'px-3.5 py-1.5 rounded-full text-slate-600 hover:text-slate-900';
+  document.getElementById('tab-carzone').className = view==='carzone' ? 'px-3.5 py-1.5 rounded-full bg-[#102a43] text-white shadow' : 'px-3.5 py-1.5 rounded-full text-slate-600 hover:text-slate-900';
+  closeAllTips();
+  renderCrowdZones();
+}
+
+function selectDest(name,time,crowd,route,view){
+  document.querySelectorAll('.dest').forEach(b=>{
+    b.classList.remove('active','bg-[#eef7ff]','border-[#2471a3]');
+    b.classList.add('bg-white','border-[#d9e2ec]');
+  });
+  event.currentTarget.classList.add('active','bg-[#eef7ff]','border-[#2471a3]');
+  event.currentTarget.classList.remove('bg-white','border-[#d9e2ec]');
+
+  const crowdColor = crowd==='Low' ? 'text-emerald-700' : crowd==='Medium' ? 'text-amber-700' : 'text-red-700';
+  document.getElementById('result').innerHTML = `
+    <strong class="block text-sm mb-1">Recommended: ${route}</strong>
+    <p class="text-sm text-slate-600">${name} • ${time} walk</p>
+    <span class="inline-flex items-center gap-1 text-[11px] font-extrabold ${crowdColor} mt-1">● Live crowd: ${crowd}</span>
+    <button onclick="alert('Navigation started — follow ${route} to ${name}.')" class="mt-3 w-full bg-[#102a43] hover:bg-[#153752] text-white rounded-xl py-2.5 text-sm font-bold transition">Start Navigation →</button>`;
+
+  if(view) switchMap(view);
+
+  const r=document.getElementById('route');
+  r.classList.add('show');
+  if(view==='carzone'){
+    r.style.left='22%'; r.style.top='52%'; r.style.width='42%'; r.style.transform='rotate(0deg)';
+  } else if(view==='busservice'){
+    r.style.left='12%'; r.style.top='30%'; r.style.width='52%'; r.style.transform='rotate(-8deg)';
+  } else {
+    // cluster
+    r.style.left='18%'; r.style.top='48%'; r.style.width='48%'; r.style.transform='rotate(-2deg)';
+  }
+  // pulse
+  r.animate([{opacity:.3},{opacity:1}],{duration:400});
+}
+
+function toggleTip(e, id){
+  e.stopPropagation();
+  const el=document.getElementById(id);
+  const isOpen = el.classList.contains('open');
+  closeAllTips();
+  if(!isOpen) el.classList.add('open');
+}
+function closeTip(id){ document.getElementById(id).classList.remove('open'); }
+function closeAllTips(){ document.querySelectorAll('.tooltip').forEach(t=>t.classList.remove('open')); }
+document.addEventListener('click', closeAllTips);
+
+// initial zones rendered via renderTraffic() → renderCrowdZones(); ensure first paint
+// addPeople() removed — replaced by semi-transparent density zones (crowd-zone)
+renderCrowdZones();
+
+setInterval(()=>{
+  const peak = isPeakHours();
+  const highDay = isHighTrafficDay();
+  // higher delta on Fri/Sat/Sun/PH
+  const bias = highDay ? 2 : 0;
+  areas.forEach(a=>{
+    let delta = Math.floor(Math.random()*11)-5 + bias;
+    if(a.name==='LTA Office'){
+      if(!peak){
+        // keep <10 unless peak
+        a.people = Math.max(2, Math.min(9, a.people + delta));
+        // occasional clamp
+        if(a.people>=10) a.people= 6 + Math.floor(Math.random()*4);
+      } else {
+        a.people = Math.max(4, Math.min(38, a.people + delta + 1));
+      }
+    } else if(a.isParking){
+      // max 8 cars
+      a.people = Math.max(0, Math.min(a.capacity, a.people + Math.floor(Math.random()*5)-2 + (highDay?1:0)));
+    } else if(a.isToilet){
+      // Toilet queue can exceed 15 to trigger High >15
+      a.people = Math.max(0, Math.min(30, a.people + Math.floor(Math.random()*5)-2 + (highDay?1:0)));
+    } else {
+      a.people=Math.max(2, a.people+delta);
+      if(a.name==='Counter Area') a.people = Math.max(12, Math.min(85, a.people));
+      if(a.name==='Bus Area') a.people = Math.max(8, Math.min(70, a.people));
+    }
+  });
+  renderTraffic();
+},3000);
+</script>
+</body>
+</html>
